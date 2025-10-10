@@ -86,7 +86,7 @@ download_api() {
     *) warn "Unbekannte Architektur $(uname -m), nehme amd64."; arch="amd64" ;;
   esac
 
-  # FULL-Build: API liefert Frontend mit aus (optional trotzdem separates Frontend möglich)
+  # FULL-Build (liefert optional auch das Frontend mit aus)
   zipname="vikunja-v${ver#v}-linux-${arch}-full.zip"
   url="https://dl.vikunja.io/vikunja/${ver#v}/${zipname}"
 
@@ -95,8 +95,12 @@ download_api() {
   wget -q --show-progress "${url}"
 
   info "Ermittle Binary-Pfad im ZIP..."
-  # Liste alle Dateien im ZIP, suche 'vikunja' (exakte Datei, kein Verzeichnis)
-  binpath="$(unzip -Z1 "${zipname}" | awk '/(^|\/)vikunja$/ {print; exit}')"
+  # Nimm die erste Datei, die 'vikunja' oder 'vikunja-*' heißt (ohne bekannte Text/Meta-Endungen)
+  binpath="$(unzip -Z1 "${zipname}" \
+    | awk 'BEGIN{IGNORECASE=1} \
+           /(^|\/)vikunja($|-[^\/]+$)/ && \
+           !/\.sha256$/ && !/\.yml$/ && !/\.yaml$/ && !/\.txt$/ && !/\.md$/ && !/(^|\/)LICENSE$/ {print; exit}')"
+
   if [ -z "${binpath}" ]; then
     err "Konnte die Vikunja-Binary im ZIP nicht finden."
     unzip -Z1 "${zipname}" | sed 's/^/  - /'
@@ -105,12 +109,12 @@ download_api() {
   info "Gefundene Binary: ${binpath}"
 
   info "Extrahiere Binary nach ${API_BIN} ..."
-  # Streame die Datei direkt aus dem ZIP heraus
   unzip -p "${zipname}" "${binpath}" > "${API_BIN}"
   chmod 0755 "${API_BIN}"
   rm -f "${zipname}"
   ok "vikunja installiert: ${API_BIN}"
 }
+
 
 # --- Write API config ----------------------------------------------------------
 write_api_config() {
