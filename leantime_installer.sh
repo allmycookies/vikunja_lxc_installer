@@ -2,10 +2,12 @@
 # ==============================================================================
 # Leantime Installer & Manager (Apache + PHP 8.2 + MariaDB) for Debian 12
 # Reverse-Proxy friendly (Nginx Proxy Manager)
-# v1.2
+# v1.3
 #  - Git Default-Branch Auto-Detect
-#  - Release ZIP support (Composer skipped when no composer.json)
+#  - Robust Release ZIP support (curl retry, bsdtar, auto top-level detect)
+#  - Composer skipped when no composer.json (official ZIPs)
 #  - config/.env alignment with official docs
+#  - vHost: DocumentRoot .../public + DirectoryIndex + AllowOverride All
 # ==============================================================================
 
 set -euo pipefail
@@ -48,9 +50,9 @@ install_packages() {
   apt-get update
   apt-get upgrade -y
 
-  info "Installiere Apache, PHP ${PHP_VER} & Extensions, MariaDB, Git/Composer…"
+  info "Installiere Apache, PHP ${PHP_VER} & Extensions, MariaDB, Git/Composer, Tools…"
   apt-get install -y \
-    apache2 mariadb-server git unzip curl ca-certificates rsync \
+    apache2 mariadb-server git unzip curl ca-certificates rsync libarchive-tools \
     php${PHP_VER} php${PHP_VER}-mysql php${PHP_VER}-mbstring php${PHP_VER}-xml \
     php${PHP_VER}-curl php${PHP_VER}-zip php${PHP_VER}-gd php${PHP_VER}-intl \
     php${PHP_VER}-bcmath php${PHP_VER}-cli php${PHP_VER}-opcache php${PHP_VER}-ldap \
@@ -72,48 +74,72 @@ prepare_db() {
   ok "MariaDB konfiguriert."
 }
 
-fetch_leantime() {
-  local method="$1" ref_or_url="$2"
-  info "Hole Leantime (${method})…"
+fetch_leantime_git() {
+  local ref="$1"
+  info "Hole Leantime (git)…"
   rm -rf "${WEB_ROOT}"
   mkdir -p "${WEB_ROOT}"
 
-  if [ "${method}" = "git" ]; then
-    if [ -z "${ref_or_url}" ]; then
-      info "Ermittle Default-Branch…"
-      local default_ref
-      default_ref="$(git ls-remote --symref https://github.com/Leantime/leantime.git HEAD 2>/dev/null | awk '/^ref:/ {print $2}' | awk -F/ '{print $3}')"
-      if [ -z "${default_ref}" ]; then
-        warn "Konnte Default-Branch nicht ermitteln – klone Repo-Default."
-        git clone --depth 1 https://github.com/Leantime/leantime.git "${WEB_ROOT}"
-      else
-        info "Default-Branch: ${default_ref}"
-        git clone --depth 1 --branch "${default_ref}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
-      fi
+  if [ -z "${ref}" ]; then
+    info "Ermittle Default-Branch…"
+    local default_ref
+    default_ref="$(git ls-remote --symref https://github.com/Leantime/leantime.git HEAD 2>/dev/null | awk '/^ref:/ {print $2}' | awk -F/ '{print $3}')"
+    if [ -z "${default_ref}" ]; then
+      warn "Konnte Default-Branch nicht ermitteln – klone Repo-Default."
+      git clone --depth 1 https://github.com/Leantime/leantime.git "${WEB_ROOT}"
     else
-      # Ref validieren (Head/Tag)
-      if git ls-remote --exit-code --heads https://github.com/Leantime/leantime.git "${ref_or_url}" >/dev/null 2>&1 \
-      || git ls-remote --exit-code --tags  https://github.com/Leantime/leantime.git "refs/tags/${ref_or_url}" >/dev/null 2>&1; then
-        git clone --depth 1 --branch "${ref_or_url}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
-      else
-        err "Ref '${ref_or_url}' nicht gefunden."
-        echo "Beispiele:"
-        echo "  Branches: $(git ls-remote --heads https://github.com/Leantime/leantime.git | awk '{print $2}' | awk -F/ '{print $3}' | paste -sd ', ' -)"
-        echo "  Tags:     $(git ls-remote --tags  https://github.com/Leantime/leantime.git | awk '{print $2}' | awk -F/ '{print $3}' | grep -E '^v' | tail -n 10 | paste -sd ', ' -)"
-        exit 1
-      fi
+      info "Default-Branch: ${default_ref}"
+      git clone --depth 1 --branch "${default_ref}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
     fi
   else
-    cd /tmp
-    wget -q --show-progress -O leantime.zip "${ref_or_url}"
-    rm -rf /tmp/leantime_zip && mkdir -p /tmp/leantime_zip
-    unzip -oq leantime.zip -d /tmp/leantime_zip
-    local topdir
-    topdir="$(find /tmp/leantime_zip -maxdepth 1 -mindepth 1 -type d | head -n1)"
-    rsync -a "${topdir}/" "${WEB_ROOT}/"
-    rm -rf /tmp/leantime.zip /tmp/leantime_zip
+    if git ls-remote --exit-code --heads https://github.com/Leantime/leantime.git "${ref}" >/dev/null 2>&1 \
+    || git ls-remote --exit-code --tags  https://github.com/Leantime/leantime.git "refs/tags/${ref}" >/dev/null 2>&1; then
+      git clone --depth 1 --branch "${ref}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
+    else
+      err "Ref '${ref}' nicht gefunden."
+      echo "Beispiele:"
+      echo "  Branches: $(git ls-remote --heads https://github.com/Leantime/leantime.git | awk '{print $2}' | awk -F/ '{print $3}' | paste -sd ', ' -)"
+      echo "  Tags:     $(git ls-remote --tags  https://github.com/Leantime/leantime.git | awk '{print $2}' | awk -F/ '{print $3}' | grep -E '^v' | tail -n 10 | paste -sd ', ' -)"
+      exit 1
+    fi
+  fi
+  ok "Leantime Code liegt in ${WEB_ROOT}"
+}
+
+fetch_leantime_zip() {
+  local url="$1"
+  info "Hole Leantime (zip)…"
+  local tmpzip="/tmp/leantime_release.zip"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  # robust herunterladen
+  curl -fL --retry 5 --retry-delay 2 -o "${tmpzip}" "${url}"
+
+  info "Entpacke ZIP (bsdtar)…"
+  bsdtar -xf "${tmpzip}" -C "${tmpdir}"
+
+  # Quelle finden, die public/index.php enthält
+  local src_dir
+  src_dir="$(find "${tmpdir}" -type f -path '*/public/index.php' -printf '%h\n' | sed 's:/public$::' | head -n1)"
+
+  if [ -z "${src_dir}" ]; then
+    err "Konnte im ZIP keinen Ordner mit public/index.php finden. Struktur unerwartet."
+    find "${tmpdir}" -maxdepth 3 -type d -name public -print || true
+    exit 1
   fi
 
+  rm -rf "${WEB_ROOT}" && mkdir -p "${WEB_ROOT}"
+  rsync -a "${src_dir}/" "${WEB_ROOT}/"
+
+  # Sicherheitscheck
+  if [ ! -f "${WEB_PUBLIC}/index.php" ]; then
+    err "Nach dem Entpacken fehlt ${WEB_PUBLIC}/index.php – Abbruch."
+    exit 1
+  fi
+
+  rm -f "${tmpzip}"
+  rm -rf "${tmpdir}"
   ok "Leantime Code liegt in ${WEB_ROOT}"
 }
 
@@ -177,12 +203,12 @@ write_apache_vhost() {
     DocumentRoot ${WEB_PUBLIC}
 
     <Directory ${WEB_PUBLIC}>
+        Options FollowSymLinks
         AllowOverride All
         Require all granted
-        Options FollowSymLinks
+        DirectoryIndex index.php index.html
     </Directory>
 
-    # Security/Headers (Basis)
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "SAMEORIGIN"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
@@ -195,6 +221,7 @@ EOF
 
   a2dissite 000-default.conf >/dev/null 2>&1 || true
   a2ensite leantime.conf >/dev/null
+  a2enmod rewrite headers >/dev/null 2>&1 || true
   systemctl reload apache2
   ok "vHost aktiv."
 }
@@ -306,9 +333,15 @@ EOF
   prepare_db "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
 
   if [ "${SRC_MODE}" = "1" ]; then
-    fetch_leantime "git" "${GIT_REF}"
+    fetch_leantime_git "${GIT_REF}"
   else
-    fetch_leantime "zip" "${ZIP_URL}"
+    fetch_leantime_zip "${ZIP_URL}"
+  fi
+
+  # Safety: Index prüfen
+  if [ ! -f "${WEB_PUBLIC}/index.php" ]; then
+    err "Fehlender Index nach dem Code-Download. Abbruch."
+    exit 1
   fi
 
   composer_install
