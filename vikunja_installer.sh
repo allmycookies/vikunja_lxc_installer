@@ -2,7 +2,7 @@
 # ==============================================================================
 # Vikunja Installer & Manager (interactive)
 # Debian 12 - MariaDB - Reverse Proxy friendly
-# v1.4  (fix: extract binary by path from ZIP using unzip -Z1 / -p)
+# v1.5  (fix: robust binary selection in FULL zip)
 # ==============================================================================
 set -euo pipefail
 
@@ -78,7 +78,7 @@ create_system_user() {
 
 # --- Download API (FULL zip includes frontend) --------------------------------
 download_api() {
-  local ver="$1" arch zipname url binpath
+  local ver="$1" arch zipname url binpath expected
   arch=$(uname -m)
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
@@ -95,26 +95,41 @@ download_api() {
   wget -q --show-progress "${url}"
 
   info "Ermittle Binary-Pfad im ZIP..."
-  # Nimm die erste Datei, die 'vikunja' oder 'vikunja-*' heißt (ohne bekannte Text/Meta-Endungen)
+  # 1) Bevorzugt 'vikunja' oder 'vikunja-*' (keine Meta-Dateien, kein Ordner)
   binpath="$(unzip -Z1 "${zipname}" \
-    | awk 'BEGIN{IGNORECASE=1} \
-           /(^|\/)vikunja($|-[^\/]+$)/ && \
-           !/\.sha256$/ && !/\.yml$/ && !/\.yaml$/ && !/\.txt$/ && !/\.md$/ && !/(^|\/)LICENSE$/ {print; exit}')"
+    | grep -E '^vikunja($|-)' \
+    | grep -Ev '\.sha256$|\.ya?ml$|\.txt$|\.md$|^LICENSE$|/$' \
+    | head -n1 || true)"
+
+  # 2) Fallback: exakt erwarteter Name (z. B. vikunja-v0.24.4-linux-amd64)
+  if [ -z "${binpath}" ]; then
+    expected="vikunja-v${ver#v}-linux-${arch}"
+    if unzip -Z1 "${zipname}" | grep -qx "${expected}"; then
+      binpath="${expected}"
+    fi
+  fi
+
+  # 3) Letzter Fallback: erste Datei, die mit 'vikunja' beginnt und kein Meta ist
+  if [ -z "${binpath}" ]; then
+    binpath="$(unzip -Z1 "${zipname}" \
+      | grep -E '^vikunja' \
+      | grep -Ev '\.sha256$|\.ya?ml$|\.txt$|\.md$|^LICENSE$|/$' \
+      | head -n1 || true)"
+  fi
 
   if [ -z "${binpath}" ]; then
     err "Konnte die Vikunja-Binary im ZIP nicht finden."
     unzip -Z1 "${zipname}" | sed 's/^/  - /'
     exit 1
   fi
-  info "Gefundene Binary: ${binpath}"
 
+  info "Gefundene Binary: ${binpath}"
   info "Extrahiere Binary nach ${API_BIN} ..."
   unzip -p "${zipname}" "${binpath}" > "${API_BIN}"
   chmod 0755 "${API_BIN}"
   rm -f "${zipname}"
   ok "vikunja installiert: ${API_BIN}"
 }
-
 
 # --- Write API config ----------------------------------------------------------
 write_api_config() {
