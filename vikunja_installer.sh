@@ -2,7 +2,7 @@
 # ==============================================================================
 # Vikunja Installer & Manager (interactive)
 # Debian 12 - MariaDB - Reverse Proxy friendly
-# v1.3  (fix: robust ZIP extraction for FULL builds)
+# v1.4  (fix: extract binary by path from ZIP using unzip -Z1 / -p)
 # ==============================================================================
 set -euo pipefail
 
@@ -67,8 +67,8 @@ prepare_db() {
 
 # --- System user / dirs --------------------------------------------------------
 create_system_user() {
+  info "Systembenutzer ${API_USER} anlegen..."
   if ! id -u "${API_USER}" >/dev/null 2>&1; then
-    info "Systembenutzer ${API_USER} anlegen..."
     useradd --system --home "${API_DATA_DIR}" --shell /usr/sbin/nologin "${API_USER}"
   fi
   mkdir -p "${API_DATA_DIR}" "${API_ETC_DIR}"
@@ -78,7 +78,7 @@ create_system_user() {
 
 # --- Download API (FULL zip includes frontend) --------------------------------
 download_api() {
-  local ver="$1" arch zipname url workdir binpath
+  local ver="$1" arch zipname url binpath
   arch=$(uname -m)
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
@@ -94,22 +94,21 @@ download_api() {
   cd /tmp
   wget -q --show-progress "${url}"
 
-  info "Entpacke ${zipname} ..."
-  workdir="$(mktemp -d /tmp/vikunja_full_XXXX)"
-  unzip -oq "${zipname}" -d "${workdir}"
-
-  # Binary robust finden (egal wo sie im ZIP liegt)
-  binpath="$(find "${workdir}" -type f -name vikunja -print -quit || true)"
+  info "Ermittle Binary-Pfad im ZIP..."
+  # Liste alle Dateien im ZIP, suche 'vikunja' (exakte Datei, kein Verzeichnis)
+  binpath="$(unzip -Z1 "${zipname}" | awk '/(^|\/)vikunja$/ {print; exit}')"
   if [ -z "${binpath}" ]; then
     err "Konnte die Vikunja-Binary im ZIP nicht finden."
-    ls -la "${workdir}" || true
+    unzip -Z1 "${zipname}" | sed 's/^/  - /'
     exit 1
   fi
-  chmod +x "${binpath}"
-  install -m 0755 "${binpath}" "${API_BIN}"
+  info "Gefundene Binary: ${binpath}"
 
+  info "Extrahiere Binary nach ${API_BIN} ..."
+  # Streame die Datei direkt aus dem ZIP heraus
+  unzip -p "${zipname}" "${binpath}" > "${API_BIN}"
+  chmod 0755 "${API_BIN}"
   rm -f "${zipname}"
-  rm -rf "${workdir}"
   ok "vikunja installiert: ${API_BIN}"
 }
 
@@ -121,9 +120,7 @@ write_api_config() {
   mkdir -p "$(dirname "${API_CFG}")"
   cat > "${API_CFG}" <<EOF
 service:
-  # Öffentliche URL der API (wichtig für Links/E-Mails)
   publicurl: "${public_url}"
-  # API lauscht nur lokal; Reverse Proxy übernimmt TLS/Host
   interface: "127.0.0.1:3456"
 
 log:
@@ -136,7 +133,6 @@ database:
   password: "${dbpass}"
   database: "${dbname}"
 
-# CORS nur nötig, wenn Frontend auf separater Domain
 cors:
   enabled: $([ "${mode}" = "SEPARATE" ] && echo true || echo false)
   alloworigins:
@@ -319,10 +315,8 @@ EOF
 
 # --- Manager menu --------------------------------------------------------------
 manager_menu() {
-  # STATE laden (falls vorhanden)
   [ -f "${STATE_FILE}" ] && . "${STATE_FILE}" || true
 
-  # Falls keine State-Datei, aber Artefakte → provisorische Werte sammeln
   if [ ! -f "${STATE_FILE}" ] && is_installed; then
     warn "Bestehende Installation erkannt – generiere State-Datei."
     API_URL="$(awk -F': ' '/publicurl:/{print $2; exit}' "${API_CFG}" 2>/dev/null || true)"
