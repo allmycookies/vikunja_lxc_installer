@@ -2,7 +2,10 @@
 # ==============================================================================
 # Leantime Installer & Manager (Apache + PHP 8.2 + MariaDB) for Debian 12
 # Reverse-Proxy friendly (Nginx Proxy Manager)
-# v1.1  (align with official Readme: config/.env, required PHP extensions)
+# v1.2
+#  - Git Default-Branch Auto-Detect
+#  - Release ZIP support (Composer skipped when no composer.json)
+#  - config/.env alignment with official docs
 # ==============================================================================
 
 set -euo pipefail
@@ -53,7 +56,7 @@ install_packages() {
     php${PHP_VER}-bcmath php${PHP_VER}-cli php${PHP_VER}-opcache php${PHP_VER}-ldap \
     php${PHP_VER}-exif composer
 
-  a2enmod rewrite headers env mime dir
+  a2enmod rewrite headers env mime dir >/dev/null
   systemctl enable --now apache2
   systemctl enable --now mariadb
   ok "Pakete & Dienste bereit."
@@ -74,8 +77,32 @@ fetch_leantime() {
   info "Hole Leantime (${method})…"
   rm -rf "${WEB_ROOT}"
   mkdir -p "${WEB_ROOT}"
+
   if [ "${method}" = "git" ]; then
-    git clone --depth 1 --branch "${ref_or_url}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
+    if [ -z "${ref_or_url}" ]; then
+      info "Ermittle Default-Branch…"
+      local default_ref
+      default_ref="$(git ls-remote --symref https://github.com/Leantime/leantime.git HEAD 2>/dev/null | awk '/^ref:/ {print $2}' | awk -F/ '{print $3}')"
+      if [ -z "${default_ref}" ]; then
+        warn "Konnte Default-Branch nicht ermitteln – klone Repo-Default."
+        git clone --depth 1 https://github.com/Leantime/leantime.git "${WEB_ROOT}"
+      else
+        info "Default-Branch: ${default_ref}"
+        git clone --depth 1 --branch "${default_ref}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
+      fi
+    else
+      # Ref validieren (Head/Tag)
+      if git ls-remote --exit-code --heads https://github.com/Leantime/leantime.git "${ref_or_url}" >/dev/null 2>&1 \
+      || git ls-remote --exit-code --tags  https://github.com/Leantime/leantime.git "refs/tags/${ref_or_url}" >/dev/null 2>&1; then
+        git clone --depth 1 --branch "${ref_or_url}" https://github.com/Leantime/leantime.git "${WEB_ROOT}"
+      else
+        err "Ref '${ref_or_url}' nicht gefunden."
+        echo "Beispiele:"
+        echo "  Branches: $(git ls-remote --heads https://github.com/Leantime/leantime.git | awk '{print $2}' | awk -F/ '{print $3}' | paste -sd ', ' -)"
+        echo "  Tags:     $(git ls-remote --tags  https://github.com/Leantime/leantime.git | awk '{print $2}' | awk -F/ '{print $3}' | grep -E '^v' | tail -n 10 | paste -sd ', ' -)"
+        exit 1
+      fi
+    fi
   else
     cd /tmp
     wget -q --show-progress -O leantime.zip "${ref_or_url}"
@@ -86,17 +113,21 @@ fetch_leantime() {
     rsync -a "${topdir}/" "${WEB_ROOT}/"
     rm -rf /tmp/leantime.zip /tmp/leantime_zip
   fi
+
   ok "Leantime Code liegt in ${WEB_ROOT}"
 }
 
 composer_install() {
   info "Composer Install (prod)…"
   cd "${WEB_ROOT}"
-  # Releases enthalten vendor meist schon; bei Git-Clone sicherstellen:
-  if [ ! -d "vendor" ]; then
-    COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+  if [ -f "composer.json" ]; then
+    if [ ! -d "vendor" ]; then
+      COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+    fi
+    ok "Composer done."
+  else
+    info "Kein composer.json gefunden – Release-ZIP erkannt, Composer wird übersprungen."
   fi
-  ok "Composer done."
 }
 
 write_env() {
@@ -108,7 +139,7 @@ write_env() {
     cp config/sample.env config/.env
   fi
 
-  # APP URL (Docker nutzt LEAN_APP_URL; hier lokale Installation → APP_URL)
+  # APP URL
   if grep -q "^APP_URL=" config/.env 2>/dev/null; then
     sed -i "s|^APP_URL=.*|APP_URL=${app_url}|g" config/.env
   else
@@ -116,36 +147,23 @@ write_env() {
   fi
 
   # DB
-  if grep -q "^DB_CONNECTION=" config/.env 2>/dev/null; then
-    sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=mysql|g" config/.env
-  else
-    echo "DB_CONNECTION=mysql" >> config/.env
-  fi
-  if grep -q "^DB_HOST=" config/.env 2>/dev/null; then
-    sed -i "s|^DB_HOST=.*|DB_HOST=127.0.0.1|g" config/.env
-  else
-    echo "DB_HOST=127.0.0.1" >> config/.env
-  fi
-  if grep -q "^DB_PORT=" config/.env 2>/dev/null; then
-    sed -i "s|^DB_PORT=.*|DB_PORT=3306|g" config/.env
-  else
-    echo "DB_PORT=3306" >> config/.env
-  fi
-  if grep -q "^DB_DATABASE=" config/.env 2>/dev/null; then
-    sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${dbname}|g" config/.env
-  else
-    echo "DB_DATABASE=${dbname}" >> config/.env
-  fi
-  if grep -q "^DB_USERNAME=" config/.env 2>/dev/null; then
-    sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${dbuser}|g" config/.env
-  else
-    echo "DB_USERNAME=${dbuser}" >> config/.env
-  fi
-  if grep -q "^DB_PASSWORD=" config/.env 2>/dev/null; then
-    sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${dbpass}|g" config/.env
-  else
-    echo "DB_PASSWORD=${dbpass}" >> config/.env
-  fi
+  grep -q "^DB_CONNECTION=" config/.env 2>/dev/null || echo "DB_CONNECTION=mysql" >> config/.env
+  sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=mysql|g" config/.env
+
+  grep -q "^DB_HOST=" config/.env 2>/dev/null || echo "DB_HOST=127.0.0.1" >> config/.env
+  sed -i "s|^DB_HOST=.*|DB_HOST=127.0.0.1|g" config/.env
+
+  grep -q "^DB_PORT=" config/.env 2>/dev/null || echo "DB_PORT=3306" >> config/.env
+  sed -i "s|^DB_PORT=.*|DB_PORT=3306|g" config/.env
+
+  grep -q "^DB_DATABASE=" config/.env 2>/dev/null || echo "DB_DATABASE=${dbname}" >> config/.env
+  sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${dbname}|g" config/.env
+
+  grep -q "^DB_USERNAME=" config/.env 2>/dev/null || echo "DB_USERNAME=${dbuser}" >> config/.env
+  sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${dbuser}|g" config/.env
+
+  grep -q "^DB_PASSWORD=" config/.env 2>/dev/null || echo "DB_PASSWORD=${dbpass}" >> config/.env
+  sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${dbpass}|g" config/.env
 
   ok "config/.env geschrieben."
 }
@@ -176,7 +194,7 @@ write_apache_vhost() {
 EOF
 
   a2dissite 000-default.conf >/dev/null 2>&1 || true
-  a2ensite leantime.conf
+  a2ensite leantime.conf >/dev/null
   systemctl reload apache2
   ok "vHost aktiv."
 }
@@ -207,7 +225,6 @@ fix_permissions() {
   find "${WEB_ROOT}" -type d -exec chmod 755 {} \;
   find "${WEB_ROOT}" -type f -exec chmod 644 {} \;
 
-  # schreibbare Verzeichnisse
   mkdir -p "${WEB_ROOT}/storage" "${WEB_PUBLIC}/userfiles" "${WEB_ROOT}/config"
   chown -R www-data:www-data "${WEB_ROOT}/storage" "${WEB_PUBLIC}/userfiles" "${WEB_ROOT}/config"
   chmod -R 775 "${WEB_ROOT}/storage" "${WEB_PUBLIC}/userfiles" "${WEB_ROOT}/config"
@@ -239,17 +256,17 @@ service_restart() { systemctl restart apache2 mariadb; ok "Dienste neu gestartet
 run_install() {
   echo
   b "Quellcode-Bezug wählen:"
-  echo "  1) Git (empfohlen) – Branch/Tag angeben (z. B. master oder v3.x)"
-  echo "  2) ZIP-URL – Release-ZIP (Leantime-vX.Y.Z.zip) angeben"
+  echo "  1) Git – Branch/Tag angeben (leer = Default-Branch)"
+  echo "  2) ZIP-URL – Release-ZIP (Leantime-vX.Y.Z.zip)"
   read -rp "Auswahl [1/2] (Default 1): " SRC_MODE
   [ -z "${SRC_MODE}" ] && SRC_MODE=1
 
   local GIT_REF ZIP_URL
   if [ "${SRC_MODE}" = "1" ]; then
-    read -rp "Git Ref (Default: master): " GIT_REF
-    GIT_REF=${GIT_REF:-master}
+    read -rp "Git Ref (leer = Default-Branch): " GIT_REF
+    GIT_REF="${GIT_REF:-}"
   else
-    read -rp "ZIP-URL (z. B. https://github.com/Leantime/leantime/releases/download/vX.Y.Z/Leantime-vX.Y.Z.zip): " ZIP_URL
+    read -rp "ZIP-URL (z. B. https://github.com/Leantime/leantime/releases/download/v3.5.12/Leantime-v3.5.12.zip): " ZIP_URL
     [ -z "${ZIP_URL}" ] && { err "ZIP-URL darf nicht leer sein."; exit 1; }
   fi
 
