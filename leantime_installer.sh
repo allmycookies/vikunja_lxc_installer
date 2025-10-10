@@ -239,15 +239,15 @@ service_restart() { systemctl restart apache2 mariadb; ok "Dienste neu gestartet
 run_install() {
   echo
   b "Quellcode-Bezug wählen:"
-  echo "  1) Git (empfohlen) – Branch/Tag angeben (z. B. main oder v3.x)"
+  echo "  1) Git (empfohlen) – Branch/Tag angeben (z. B. master oder v3.x)"
   echo "  2) ZIP-URL – Release-ZIP (Leantime-vX.Y.Z.zip) angeben"
   read -rp "Auswahl [1/2] (Default 1): " SRC_MODE
   [ -z "${SRC_MODE}" ] && SRC_MODE=1
 
   local GIT_REF ZIP_URL
   if [ "${SRC_MODE}" = "1" ]; then
-    read -rp "Git Ref (Default: main): " GIT_REF
-    GIT_REF=${GIT_REF:-main}
+    read -rp "Git Ref (Default: master): " GIT_REF
+    GIT_REF=${GIT_REF:-master}
   else
     read -rp "ZIP-URL (z. B. https://github.com/Leantime/leantime/releases/download/vX.Y.Z/Leantime-vX.Y.Z.zip): " ZIP_URL
     [ -z "${ZIP_URL}" ] && { err "ZIP-URL darf nicht leer sein."; exit 1; }
