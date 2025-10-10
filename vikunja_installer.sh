@@ -140,7 +140,7 @@ write_api_config() {
   cat > "${API_CFG}" <<EOF
 service:
   publicurl: "${public_url}"
-  interface: "127.0.0.1:3456"
+  interface: "0.0.0.0:3456"
 
 log:
   level: "info"
