@@ -2,7 +2,7 @@
 # ==============================================================================
 # Vikunja Installer & Manager (interactive)
 # Debian 12 - MariaDB - Reverse Proxy friendly
-# v1.2
+# v1.3  (fix: robust ZIP extraction for FULL builds)
 # ==============================================================================
 set -euo pipefail
 
@@ -78,7 +78,7 @@ create_system_user() {
 
 # --- Download API (FULL zip includes frontend) --------------------------------
 download_api() {
-  local ver="$1" arch zipname url
+  local ver="$1" arch zipname url workdir binpath
   arch=$(uname -m)
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
@@ -93,10 +93,23 @@ download_api() {
   info "Lade ${url} ..."
   cd /tmp
   wget -q --show-progress "${url}"
+
   info "Entpacke ${zipname} ..."
-  unzip -oq "${zipname}"
-  install -m 0755 vikunja "${API_BIN}"
-  rm -f "${zipname}" vikunja
+  workdir="$(mktemp -d /tmp/vikunja_full_XXXX)"
+  unzip -oq "${zipname}" -d "${workdir}"
+
+  # Binary robust finden (egal wo sie im ZIP liegt)
+  binpath="$(find "${workdir}" -type f -name vikunja -print -quit || true)"
+  if [ -z "${binpath}" ]; then
+    err "Konnte die Vikunja-Binary im ZIP nicht finden."
+    ls -la "${workdir}" || true
+    exit 1
+  fi
+  chmod +x "${binpath}"
+  install -m 0755 "${binpath}" "${API_BIN}"
+
+  rm -f "${zipname}"
+  rm -rf "${workdir}"
   ok "vikunja installiert: ${API_BIN}"
 }
 
@@ -314,7 +327,7 @@ manager_menu() {
     warn "Bestehende Installation erkannt – generiere State-Datei."
     API_URL="$(awk -F': ' '/publicurl:/{print $2; exit}' "${API_CFG}" 2>/dev/null || true)"
     FE_URL="$(jq -r .api "${FRONTEND_CFG}" 2>/dev/null | sed 's|/api/v1$||' || echo "${API_URL}")"
-    DB_NAME="$(awk -F': ' '/database:/ {f=1;next} f && /database:/ {print $2; exit}' "${API_CFG}" 2>/dev/null || echo vikunja)"
+    DB_NAME="$(awk -F': ' '/database:/ {f=1;next} f && /database:/{print $2; exit}' "${API_CFG}" 2>/dev/null || echo vikunja)"
     DB_USER="$(awk -F': ' '/user:/{print $2; exit}' "${API_CFG}" 2>/dev/null || echo vikunja)"
     MODE="$(awk -F': ' '/enabled:/{print $2; exit}' "${API_CFG}" 2>/dev/null | grep -qi true && echo SEPARATE || echo FULL)"
     API_VER="unknown"; FE_VER="unknown"; DB_PASS="(hidden)"
