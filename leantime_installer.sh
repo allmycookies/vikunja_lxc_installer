@@ -2,11 +2,12 @@
 # ==============================================================================
 # Leantime Installer & Manager (Apache + PHP 8.2 + MariaDB) for Debian 12
 # Reverse-Proxy friendly (Nginx Proxy Manager)
-# v1.3
+# v1.3.1
 #  - Git Default-Branch Auto-Detect
 #  - Robust Release ZIP support (curl retry, bsdtar, auto top-level detect)
 #  - Composer skipped when no composer.json (official ZIPs)
-#  - config/.env alignment with official docs
+#  - config/.env writes both LEAN_* and DB_* (sample.env style: KEY = 'value')
+#  - CRLF → LF normalization for .env
 #  - vHost: DocumentRoot .../public + DirectoryIndex + AllowOverride All
 # ==============================================================================
 
@@ -113,13 +114,11 @@ fetch_leantime_zip() {
   local tmpdir
   tmpdir="$(mktemp -d)"
 
-  # robust herunterladen
   curl -fL --retry 5 --retry-delay 2 -o "${tmpzip}" "${url}"
 
   info "Entpacke ZIP (bsdtar)…"
   bsdtar -xf "${tmpzip}" -C "${tmpdir}"
 
-  # Quelle finden, die public/index.php enthält
   local src_dir
   src_dir="$(find "${tmpdir}" -type f -path '*/public/index.php' -printf '%h\n' | sed 's:/public$::' | head -n1)"
 
@@ -132,7 +131,6 @@ fetch_leantime_zip() {
   rm -rf "${WEB_ROOT}" && mkdir -p "${WEB_ROOT}"
   rsync -a "${src_dir}/" "${WEB_ROOT}/"
 
-  # Sicherheitscheck
   if [ ! -f "${WEB_PUBLIC}/index.php" ]; then
     err "Nach dem Entpacken fehlt ${WEB_PUBLIC}/index.php – Abbruch."
     exit 1
@@ -156,40 +154,69 @@ composer_install() {
   fi
 }
 
+normalize_env_line_endings() {
+  local f="$1"
+  if command -v dos2unix >/dev/null 2>&1; then
+    dos2unix -q "$f" || true
+  else
+    # Fallback: CRLF → LF
+    sed -i 's/\r$//' "$f" || true
+  fi
+}
+
+# write or replace a "KEY = 'value'" line (sample.env style; spaces around '='; quoted)
+set_env_kv_sample_style() {
+  local file="$1" key="$2" val="$3"
+  if grep -qE "^${key}[[:space:]]*=" "$file" ; then
+    sed -i "s|^${key}[[:space:]]*=.*|${key} = '${val}'|g" "$file"
+  else
+    echo "${key} = '${val}'" >> "$file"
+  fi
+}
+
+# write or replace a "KEY=value" line (plain .env style, no quotes)
+set_env_kv_plain() {
+  local file="$1" key="$2" val="$3"
+  if grep -qE "^${key}=" "$file" ; then
+    sed -i "s|^${key}=.*|${key}=${val}|g" "$file"
+  else
+    echo "${key}=${val}" >> "$file"
+  fi
+}
+
 write_env() {
   local app_url="$1" dbname="$2" dbuser="$3" dbpass="$4"
-  info "Erzeuge config/.env…"
+  info "Erzeuge/aktualisiere config/.env…"
   cd "${WEB_ROOT}"
   mkdir -p config
   if [ -f "config/sample.env" ] && [ ! -f "config/.env" ]; then
     cp config/sample.env config/.env
   fi
+  [ -f "config/.env" ] || touch config/.env
 
-  # APP URL
-  if grep -q "^APP_URL=" config/.env 2>/dev/null; then
-    sed -i "s|^APP_URL=.*|APP_URL=${app_url}|g" config/.env
-  else
-    echo "APP_URL=${app_url}" >> config/.env
-  fi
+  # Normalize CRLF
+  normalize_env_line_endings "config/.env"
 
-  # DB
-  grep -q "^DB_CONNECTION=" config/.env 2>/dev/null || echo "DB_CONNECTION=mysql" >> config/.env
-  sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=mysql|g" config/.env
+  # --- Write LEAN_* (sample.env style: KEY = 'value') ---
+  set_env_kv_sample_style "config/.env" "LEAN_APP_URL"     "${app_url}"
 
-  grep -q "^DB_HOST=" config/.env 2>/dev/null || echo "DB_HOST=127.0.0.1" >> config/.env
-  sed -i "s|^DB_HOST=.*|DB_HOST=127.0.0.1|g" config/.env
+  # Wichtig: User wurde als 'user'@'localhost' angelegt → host = 'localhost'
+  set_env_kv_sample_style "config/.env" "LEAN_DB_HOST"     "localhost"
+  set_env_kv_sample_style "config/.env" "LEAN_DB_PORT"     "3306"
+  set_env_kv_sample_style "config/.env" "LEAN_DB_DATABASE" "${dbname}"
+  set_env_kv_sample_style "config/.env" "LEAN_DB_USER"     "${dbuser}"
+  set_env_kv_sample_style "config/.env" "LEAN_DB_PASSWORD" "${dbpass}"
 
-  grep -q "^DB_PORT=" config/.env 2>/dev/null || echo "DB_PORT=3306" >> config/.env
-  sed -i "s|^DB_PORT=.*|DB_PORT=3306|g" config/.env
+  # Umgebung
+  set_env_kv_sample_style "config/.env" "LEAN_ENV"         "production"
 
-  grep -q "^DB_DATABASE=" config/.env 2>/dev/null || echo "DB_DATABASE=${dbname}" >> config/.env
-  sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${dbname}|g" config/.env
-
-  grep -q "^DB_USERNAME=" config/.env 2>/dev/null || echo "DB_USERNAME=${dbuser}" >> config/.env
-  sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${dbuser}|g" config/.env
-
-  grep -q "^DB_PASSWORD=" config/.env 2>/dev/null || echo "DB_PASSWORD=${dbpass}" >> config/.env
-  sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${dbpass}|g" config/.env
+  # --- Zusätzlich DB_* (plain env style) für Tools/CLI-Kompatibilität ---
+  set_env_kv_plain "config/.env" "APP_URL"      "${app_url}"
+  set_env_kv_plain "config/.env" "DB_HOST"      "127.0.0.1"
+  set_env_kv_plain "config/.env" "DB_PORT"      "3306"
+  set_env_kv_plain "config/.env" "DB_DATABASE"  "${dbname}"
+  set_env_kv_plain "config/.env" "DB_USERNAME"  "${dbuser}"
+  set_env_kv_plain "config/.env" "DB_PASSWORD"  "${dbpass}"
 
   ok "config/.env geschrieben."
 }
@@ -338,7 +365,6 @@ EOF
     fetch_leantime_zip "${ZIP_URL}"
   fi
 
-  # Safety: Index prüfen
   if [ ! -f "${WEB_PUBLIC}/index.php" ]; then
     err "Fehlender Index nach dem Code-Download. Abbruch."
     exit 1
