@@ -2,7 +2,7 @@
 # ==============================================================================
 # Vikunja Installer & Manager (interactive)
 # Debian 12 - MariaDB - Reverse Proxy friendly
-# v1.7  (Modes: BINARY | SAME_ORIGIN_STATIC | SEPARATE)
+# v1.8  (Modes: BINARY | SAME_ORIGIN_STATIC | SEPARATE)
 # ==============================================================================
 set -euo pipefail
 
@@ -208,19 +208,37 @@ download_frontend_to() {
   local ver="${1:-}"
   local target_dir="${2:-}"
   if [[ -z "$ver" || -z "$target_dir" ]]; then
-    echo "download_frontend_to: missing arguments. Usage: download_frontend_to <version> <target_dir>" >&2
+    err "download_frontend_to: missing arguments. Usage: download_frontend_to <version> <target_dir>"
     return 1
   fi
   ver="${ver#v}"
-
   local fezip="vikunja-frontend-${ver}.zip"
   local url="https://dl.vikunja.io/frontend/${fezip}"
+
   info "Lade Frontend: ${url} ..."
   mkdir -p "${target_dir}"
-  cd /tmp
-  wget -q --show-progress "${url}"
-  unzip -oq "${fezip}" -d "${target_dir}"
-  rm -f "${fezip}"
+  local tmpfile
+  tmpfile="$(mktemp /tmp/vikunja-fe.XXXXXX.zip)"
+  if ! wget -q -O "${tmpfile}" "${url}"; then
+    warn "wget fehlgeschlagen – versuche curl..."
+    if ! curl -fsSL -o "${tmpfile}" "${url}"; then
+      err "Konnte Frontend nicht herunterladen: ${url}"
+      return 2
+    fi
+  fi
+
+  if [ ! -s "${tmpfile}" ] || [ "$(stat -c%s "${tmpfile}")" -lt 102400 ]; then
+    err "Heruntergeladene Datei sieht zu klein aus: $(stat -c%s "${tmpfile}" 2>/dev/null || echo 0) Bytes"
+    rm -f "${tmpfile}"
+    return 3
+  fi
+
+  unzip -oq "${tmpfile}" -d "${target_dir}"
+  rm -f "${tmpfile}"
+  if [ ! -f "${target_dir}/index.html" ]; then
+    err "Frontend-Archiv entpackt, aber index.html fehlt in ${target_dir}."
+    return 4
+  fi
   ok "Frontend nach ${target_dir} installiert."
 }
 
@@ -353,6 +371,19 @@ EOF
   elif [ "${MODE}" = "SEPARATE" ]; then
     download_frontend_to "${FE_VER}" "${FRONTEND_DIR_SEPARATE}"
     write_frontend_config_separate "${FRONTEND_DIR_SEPARATE}" "${API_URL}"
+  fi
+
+  # Post-Checks
+  if [ "${MODE}" = "SAME_ORIGIN_STATIC" ]; then
+    if [ ! -f "${FRONTEND_DIR_SAME}/index.html" ]; then
+      err "Installation unvollständig: ${FRONTEND_DIR_SAME}/index.html fehlt."
+      exit 2
+    fi
+  elif [ "${MODE}" = "SEPARATE" ]; then
+    if [ ! -f "${FRONTEND_DIR_SEPARATE}/index.html" ]; then
+      err "Installation unvollständig: ${FRONTEND_DIR_SEPARATE}/index.html fehlt."
+      exit 2
+    fi
   fi
 
   echo
