@@ -2,12 +2,12 @@
 # ==============================================================================
 # Vikunja Installer & Manager (interactive)
 # Debian 12 - MariaDB - Reverse Proxy friendly
-# v1.6  (Modes: BINARY | SAME_ORIGIN_STATIC | SEPARATE)
+# v1.7  (Modes: BINARY | SAME_ORIGIN_STATIC | SEPARATE)
 # ==============================================================================
 set -euo pipefail
 
 # --- Globals ------------------------------------------------------------------
-STATE_FILE=".vikunja_install_state"
+STATE_FILE="${HOME}/.vikunja_install_state"
 
 API_BIN="/usr/local/bin/vikunja"
 API_USER="vikunja"
@@ -18,10 +18,10 @@ API_CFG="${API_ETC_DIR}/config.yml"
 API_SERVICE="/etc/systemd/system/vikunja.service"
 
 # Frontend-Ziele
-FRONTEND_DIR_SEPARATE="/var/www/vikunja"
+FRONTEND_DIR_SEPARATE="/var/www/vikunja"           # eigenständige FE-Domain
 FRONTEND_CFG_SEPARATE="${FRONTEND_DIR_SEPARATE}/config.json"
 
-FRONTEND_DIR_SAME="/var/www/vikunja-frontend"    # wird bei SAME_ORIGIN_STATIC via service.staticpath bedient
+FRONTEND_DIR_SAME="/var/www/vikunja-frontend"      # gleiche Domain (service.staticpath)
 FRONTEND_CFG_SAME="${FRONTEND_DIR_SAME}/config.json"
 
 DEFAULT_API_VER="v0.24.4"
@@ -51,7 +51,7 @@ install_packages() {
   info "System-Update & Basis-Pakete..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get upgrade -y
+  apt-get upgrade -y || true
   apt-get install -y curl wget tar unzip ca-certificates gnupg lsb-release jq mariadb-server
   ok "Pakete installiert."
 }
@@ -72,14 +72,15 @@ prepare_db() {
 create_system_user() {
   info "Systembenutzer ${API_USER} anlegen..."
   if ! id -u "${API_USER}" >/dev/null 2>&1; then
-    useradd --system --home "${API_DATA_DIR}" --shell /usr/sbin/nologin "${API_USER}"
+    useradd --system --home "${API_DATA_DIR}" --shell /usr/sbin/nologin "${API_USER}" || \
+    adduser --system --home "${API_DATA_DIR}" --shell /usr/sbin/nologin "${API_USER}"
   fi
   mkdir -p "${API_DATA_DIR}" "${API_ETC_DIR}"
   chown -R "${API_USER}:${API_GROUP}" "${API_DATA_DIR}" 2>/dev/null || chown -R "${API_USER}:${API_USER}" "${API_DATA_DIR}" || true
   ok "Systembenutzer & Verzeichnisse vorbereitet."
 }
 
-# --- Download API (FULL zip includes frontend) --------------------------------
+# --- Download API (FULL zip includes frontend assets) --------------------------
 download_api() {
   local ver="$1" arch zipname url binpath expected
   arch=$(uname -m)
@@ -204,8 +205,16 @@ EOF
 
 # --- Frontend (Downloads) ------------------------------------------------------
 download_frontend_to() {
-  local ver="$1" target_dir="$2"
-  local fezip="vikunja-frontend-${ver#v}.zip" url="https://dl.vikunja.io/frontend/${fezip}"
+  local ver="${1:-}"
+  local target_dir="${2:-}"
+  if [[ -z "$ver" || -z "$target_dir" ]]; then
+    echo "download_frontend_to: missing arguments. Usage: download_frontend_to <version> <target_dir>" >&2
+    return 1
+  fi
+  ver="${ver#v}"
+
+  local fezip="vikunja-frontend-${ver}.zip"
+  local url="https://dl.vikunja.io/frontend/${fezip}"
   info "Lade Frontend: ${url} ..."
   mkdir -p "${target_dir}"
   cd /tmp
@@ -299,13 +308,13 @@ run_install() {
   read -rp "MariaDB-User [vikunja]: " DB_USER_IN
   DB_USER=${DB_USER_IN:-vikunja}
 
-  read -srp "MariaDB-Passwort (leer = generieren): " DB_PASS
-  if [ -z "${DB_PASS}" ]; then
+  read -srp "MariaDB-Passwort (leer = generieren): " DB_PASS_IN
+  echo
+  if [ -z "${DB_PASS_IN}" ]; then
     DB_PASS="$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20)"
-    echo
     b "Generiertes DB-Passwort: ${DB_PASS}"
   else
-    echo
+    DB_PASS="${DB_PASS_IN}"
   fi
 
   # State speichern
@@ -387,7 +396,6 @@ manager_menu() {
     DB_USER="$(awk -F': ' '/user:/{print $2; exit}' "${API_CFG}" 2>/dev/null || echo vikunja)"
     MODE="$(awk '/^service:/,/^[^[:space:]]/{ if($0 ~ /staticpath:/){print "SAME_ORIGIN_STATIC"; exit}} END{if(!NR)print ""}' "${API_CFG}" 2>/dev/null)"
     if [ -z "${MODE}" ]; then
-      # CORS enabled? -> SEPARATE, sonst BINARY
       if awk -F': ' '/enabled:/{print tolower($2); exit}' "${API_CFG}" 2>/dev/null | grep -q true; then
         MODE="SEPARATE"
       else
@@ -411,8 +419,8 @@ EOF
 
   echo
   b "================= VIKUNJA MANAGER ================="
-  echo "Mode: ${MODE} | API: ${API_URL} | FE: ${FE_URL}"
-  echo "Versions: API ${API_VER} / FE ${FE_VER}"
+  echo "Mode: ${MODE:-unknown} | API: ${API_URL:-unknown} | FE: ${FE_URL:-unknown}"
+  echo "Versions: API ${API_VER:-unknown} / FE ${FE_VER:-unknown}"
   echo
   echo "  1) Status anzeigen"
   echo "  2) Dienste starten"
