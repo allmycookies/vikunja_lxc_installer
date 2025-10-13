@@ -91,7 +91,7 @@ download_api() {
   esac
 
   zipname="vikunja-v${ver#v}-linux-${arch}-full.zip"
-  url="https://dl.vikunja.io/vikunja/${ver#v}/${zipname}"
+  url="https://dl.vikunja.io/vikunja/v${ver#v}/${zipname}"
 
   info "Lade ${url} ..."
   cd /tmp
