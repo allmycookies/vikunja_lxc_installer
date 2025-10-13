@@ -2,7 +2,7 @@
 # ==============================================================================
 # Vikunja Installer & Manager (interactive)
 # Debian 12 - MariaDB - Reverse Proxy friendly
-# v1.6  (feat: allow absolute zip path for API/Frontend instead of version)
+# v1.6  (feat: allow absolute zip path or http(s) URL for API/Frontend instead of version)
 # ==============================================================================
 set -euo pipefail
 
@@ -77,11 +77,10 @@ create_system_user() {
 }
 
 # --- Download/Use API (FULL zip includes frontend) ----------------------------
-# Argument $1: entweder Version (z.B. v0.24.4) ODER absoluter Pfad zu einer FULL-Zip
+# $1: Version (z.B. v0.24.4) ODER absoluter Pfad ODER http(s)-URL zu einer FULL-Zip
 download_api() {
-  local input="$1" arch zipname url binpath expected zipfile tmp_downloaded="false"
+  local input="$1" arch zipname url binpath expected zipfile tmp_downloaded="false" from_url="false" from_local="false"
 
-  # Architektur bestimmen (nur relevant, wenn wir downloaden)
   arch=$(uname -m)
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
@@ -90,11 +89,22 @@ download_api() {
   esac
 
   if [[ "$input" = /* && -f "$input" ]]; then
-    # Lokale Zip verwenden
+    # lokaler absoluter Pfad
     zipfile="$input"
+    from_local="true"
     info "Verwende lokale FULL-Zip: ${zipfile}"
+  elif [[ "$input" =~ ^https?://.*\.zip$ ]]; then
+    # direkte http(s)-URL
+    url="$input"
+    zipname="$(basename "$url")"
+    info "Lade (direkte URL): ${url} ..."
+    cd /tmp
+    wget -q --show-progress "${url}"
+    zipfile="/tmp/${zipname}"
+    tmp_downloaded="true"
+    from_url="true"
   else
-    # Version -> von dl.vikunja.io laden
+    # klassische Version → von dl.vikunja.io laden
     local ver="$input"
     zipname="vikunja-v${ver#v}-linux-${arch}-full.zip"
     url="https://dl.vikunja.io/vikunja/${ver#v}/${zipname}"
@@ -111,7 +121,8 @@ download_api() {
     | grep -Ev '\.sha256$|\.ya?ml$|\.txt$|\.md$|^LICENSE$|/$' \
     | head -n1 || true)"
 
-  if [ -z "${binpath}" ] && [ "${tmp_downloaded}" = "true" ]; then
+  # Fallback: falls wir über Version geladen haben, prüfe den erwarteten Namen
+  if [ -z "${binpath}" ] && [ "${from_local}" != "true" ] && [ "${from_url}" != "true" ]; then
     local ver="$input"
     expected="vikunja-v${ver#v}-linux-${arch}"
     if unzip -Z1 "${zipfile}" | grep -qx "${expected}"; then
@@ -119,6 +130,7 @@ download_api() {
     fi
   fi
 
+  # Letzter Fallback: erste Datei, die mit 'vikunja' beginnt und keine Meta-Datei ist
   if [ -z "${binpath}" ]; then
     binpath="$(unzip -Z1 "${zipfile}" \
       | grep -E '^vikunja' \
@@ -136,7 +148,6 @@ download_api() {
   info "Extrahiere Binary nach ${API_BIN} ..."
   unzip -p "${zipfile}" "${binpath}" > "${API_BIN}"
   chmod 0755 "${API_BIN}"
-  # Nur löschen, wenn wir selbst heruntergeladen haben
   [ "${tmp_downloaded}" = "true" ] && rm -f "${zipfile}"
   ok "vikunja installiert: ${API_BIN}"
 }
@@ -202,7 +213,7 @@ EOF
 }
 
 # --- Frontend (separat) --------------------------------------------------------
-# Argument $1: entweder Version (z.B. v0.24.4) ODER absoluter Pfad zu einer Frontend-Zip
+# $1: Version ODER absoluter Pfad ODER http(s)-URL zu einer Frontend-Zip
 download_frontend() {
   local input="$1" fezip url zipfile tmp_downloaded="false"
 
@@ -212,6 +223,13 @@ download_frontend() {
   if [[ "$input" = /* && -f "$input" ]]; then
     zipfile="$input"
     info "Verwende lokale Frontend-Zip: ${zipfile}"
+  elif [[ "$input" =~ ^https?://.*\.zip$ ]]; then
+    url="$input"
+    fezip="$(basename "$url")"
+    info "Lade Frontend (direkte URL): ${url} ..."
+    wget -q --show-progress "${url}"
+    zipfile="/tmp/${fezip}"
+    tmp_downloaded="true"
   else
     local ver="$input"
     fezip="vikunja-frontend-${ver#v}.zip"
@@ -278,16 +296,18 @@ run_install() {
   echo
   b "Vikunja API beziehen:"
   echo "  - Gib eine Version an (z.B. ${DEFAULT_API_VER})"
-  echo "  - ODER gib den absoluten Pfad zu einer vorhandenen FULL-Zip an (z.B. /root/vikunja-v0.24.4-linux-amd64-full.zip)"
-  read -rp "Vikunja API-Version oder FULL-Zip-Pfad (Default: ${DEFAULT_API_VER}): " API_VER_IN
+  echo "  - ODER gib den absoluten Pfad zu einer vorhandenen FULL-Zip an"
+  echo "  - ODER gib eine direkte http(s)-URL zu einer FULL-Zip an"
+  read -rp "Vikunja API-Version oder FULL-Zip-Pfad/URL (Default: ${DEFAULT_API_VER}): " API_VER_IN
   API_VER=${API_VER_IN:-${DEFAULT_API_VER}}
 
   if [ "${MODE}" = "SEPARATE" ]; then
     echo
     b "Vikunja Frontend beziehen:"
     echo "  - Gib eine Version an (z.B. ${DEFAULT_FE_VER})"
-    echo "  - ODER gib den absoluten Pfad zu einer vorhandenen Frontend-Zip an (z.B. /root/vikunja-frontend-0.24.4.zip)"
-    read -rp "Vikunja Frontend-Version oder Zip-Pfad (Default: ${DEFAULT_FE_VER}): " FE_VER_IN
+    echo "  - ODER gib den absoluten Pfad zu einer vorhandenen Frontend-Zip an"
+    echo "  - ODER gib eine direkte http(s)-URL zu einer Frontend-Zip an"
+    read -rp "Vikunja Frontend-Version oder Zip-Pfad/URL (Default: ${DEFAULT_FE_VER}): " FE_VER_IN
     FE_VER=${FE_VER_IN:-${DEFAULT_FE_VER}}
   else
     FE_VER="(from full binary)"
@@ -317,12 +337,15 @@ run_install() {
     echo
   fi
 
-  # State schreiben
-  # Bei Zip-Pfaden für die Lesbarkeit ein 'zip:'-Prefix im State ablegen
+  # State schreiben (bei Zip/URL ein 'zip:' bzw. 'url:' Prefix für Lesbarkeit)
   API_VER_STATE="$API_VER"
   [[ "$API_VER" = /* ]] && API_VER_STATE="zip:${API_VER}"
+  [[ "$API_VER" =~ ^https?:// ]] && API_VER_STATE="url:${API_VER}"
   FE_VER_STATE="$FE_VER"
-  [[ "${MODE}" = "SEPARATE" && "$FE_VER" = /* ]] && FE_VER_STATE="zip:${FE_VER}"
+  if [ "${MODE}" = "SEPARATE" ]; then
+    [[ "$FE_VER" = /* ]] && FE_VER_STATE="zip:${FE_VER}"
+    [[ "$FE_VER" =~ ^https?:// ]] && FE_VER_STATE="url:${FE_VER}"
+  fi
 
   cat > "${STATE_FILE}" <<EOF
 MODE='${MODE}'
