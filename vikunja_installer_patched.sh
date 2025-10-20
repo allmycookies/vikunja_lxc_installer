@@ -52,6 +52,15 @@ install_packages() {
   ok "Pakete installiert."
 }
 
+ensure_nginx() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    info "Nginx ist nicht installiert – installiere..."
+    apt-get update -y
+    apt-get install -y nginx
+    ok "Nginx installiert."
+  fi
+}
+
 ensure_users_dirs() {
   id -u "${API_USER}" >/dev/null 2>&1 || useradd --system --home "${API_DATA_DIR}" --shell /usr/sbin/nologin "${API_USER}"
   mkdir -p "${API_DATA_DIR}" "${API_ETC_DIR}" "${FRONTEND_DIR}"
@@ -183,21 +192,13 @@ UNIT
 # --- Nginx config --------------------------------------------------------------
 write_nginx_same_origin() {
   local server_name="$1"
+  ensure_nginx
   mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+
   cat > "${NGINX_SITE}" <<EOF
 server {
   listen 80;
   server_name ${server_name};
-  return 301 https://\$host\$request_uri;
-}
-
-server {
-  listen 443 ssl http2;
-  server_name ${server_name};
-
-  # TLS Zertifikate hier eintragen:
-  ssl_certificate /etc/ssl/certs/vikunja.crt;
-  ssl_certificate_key /etc/ssl/private/vikunja.key;
 
   root ${FRONTEND_DIR};
   index index.html;
@@ -221,10 +222,12 @@ server {
   }
 }
 EOF
+
   ln -sf "${NGINX_SITE}" "${NGINX_SITE_LINK}"
   nginx -t
   systemctl reload nginx || systemctl restart nginx
-  ok "Nginx konfiguriert für Same-Origin (Frontend + /api Proxy)."
+  ok "Nginx konfiguriert (HTTP-only, TLS extern via Reverse Proxy)."
+}
 }
 
 # --- Config helpers ------------------------------------------------------------
