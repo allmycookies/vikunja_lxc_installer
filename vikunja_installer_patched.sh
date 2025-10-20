@@ -389,6 +389,3 @@ MENU
 require_root
 main_menu
 BASH
-
-sudo chmod +x /usr/local/sbin/vikunja-installer
-sudo bash -n /usr/local/sbin/vikunja-installer && echo "Syntax ok ✅"
