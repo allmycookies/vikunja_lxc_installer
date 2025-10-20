@@ -388,4 +388,3 @@ MENU
 # ===================== Entry =====================
 require_root
 main_menu
-BASH
