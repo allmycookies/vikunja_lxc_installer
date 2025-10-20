@@ -1,12 +1,8 @@
+sudo tee /usr/local/sbin/vikunja-installer >/dev/null <<'BASH'
 #!/bin/bash
-# ==============================================================================
-# Vikunja Installer & Manager (interactive) - Split/Combined Switchable
-# Debian 12 - MariaDB - Reverse Proxy friendly
-# v2.0 (adds: switch combined<->split, FE deploy from ZIP/dir, FE build from git)
-# ==============================================================================
 set -euo pipefail
 
-# --- Globals ------------------------------------------------------------------
+# ===================== Globals =====================
 STATE_FILE="/etc/vikunja/.vikunja_install_state"
 
 API_BIN="/usr/local/bin/vikunja"
@@ -27,11 +23,11 @@ NGINX_SITE_LINK="/etc/nginx/sites-enabled/vikunja.conf"
 DEFAULT_API_VER="v0.24.4"
 DEFAULT_FE_VER="v0.24.4"
 
-# --- UI helpers ----------------------------------------------------------------
-b() { echo -e "\n\033[1m$*\033[0m"; }
-info() { echo -e "[\033[34mi\033[0m] $*"; }
-ok() { echo -e "[\033[32mok\033[0m] $*"; }
-warn() { echo -e "[\033[33m!\033[0m] $*"; }
+# ===================== UI helpers =====================
+b()   { echo -e "\n\033[1m$*\033[0m"; }
+info(){ echo -e "[\033[34mi\033[0m] $*"; }
+ok()  { echo -e "[\033[32mok\033[0m] $*"; }
+warn(){ echo -e "[\033[33m!\033[0m] $*"; }
 err() { echo -e "[\033[31merr\033[0m] $*" >&2; }
 
 require_root() {
@@ -41,9 +37,9 @@ require_root() {
   fi
 }
 
-# --- System setup --------------------------------------------------------------
+# ===================== System setup =====================
 install_packages() {
-  info "System-Update & Basis-Pakete..."
+  info "System-Update & Basis-Pakete…"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get upgrade -y
@@ -54,7 +50,7 @@ install_packages() {
 
 ensure_nginx() {
   if ! command -v nginx >/dev/null 2>&1; then
-    info "Nginx ist nicht installiert – installiere..."
+    info "Nginx ist nicht installiert – installiere…"
     apt-get update -y
     apt-get install -y nginx
     ok "Nginx installiert."
@@ -68,7 +64,7 @@ ensure_users_dirs() {
   chown -R www-data:www-data "${FRONTEND_DIR}"
 }
 
-# --- Download helpers ----------------------------------------------------------
+# ===================== Download helpers =====================
 detect_arch() {
   local arch="amd64"
   case "$(dpkg --print-architecture)" in
@@ -102,7 +98,7 @@ download_frontend_release() {
   deploy_frontend_zip "/tmp/frontend.zip"
 }
 
-# --- Frontend deploy/build -----------------------------------------------------
+# ===================== Frontend deploy/build =====================
 write_frontend_config() {
   local api_subpath="${1:-/api/v1}"
   mkdir -p "$(dirname "${FRONTEND_CFG}")"
@@ -115,8 +111,8 @@ EOF
 deploy_frontend_zip() {
   local zipfile="$1"
   ensure_users_dirs
-  info "Entpacke Frontend ZIP nach ${FRONTEND_DIR} ..."
-  tmpdir="$(mktemp -d)"
+  info "Entpacke Frontend ZIP nach ${FRONTEND_DIR} …"
+  local tmpdir; tmpdir="$(mktemp -d)"
   unzip -q "${zipfile}" -d "${tmpdir}"
   rsync -a --delete "${tmpdir}/" "${FRONTEND_DIR}/"
   rm -rf "${tmpdir}"
@@ -128,7 +124,7 @@ deploy_frontend_zip() {
 deploy_frontend_dir() {
   local distdir="$1"
   ensure_users_dirs
-  info "Deploy Frontend aus Ordner ${distdir} → ${FRONTEND_DIR} ..."
+  info "Deploy Frontend aus Ordner ${distdir} → ${FRONTEND_DIR} …"
   rsync -a --delete "${distdir}/" "${FRONTEND_DIR}/"
   chown -R www-data:www-data "${FRONTEND_DIR}"
   write_frontend_config "/api/v1"
@@ -166,7 +162,7 @@ build_frontend_from_git() {
   ok "Frontend aus Source gebaut & deployed."
 }
 
-# --- API: systemd services -----------------------------------------------------
+# ===================== API: systemd services =====================
 write_api_split_service() {
   cat > /etc/systemd/system/${API_SERVICE_SPLIT}.service <<'UNIT'
 [Unit]
@@ -189,7 +185,7 @@ UNIT
   ok "systemd Service (${API_SERVICE_SPLIT}) geschrieben."
 }
 
-# --- Nginx config --------------------------------------------------------------
+# ===================== Nginx (HTTP-only, hinter NPM) =====================
 write_nginx_same_origin() {
   local server_name="$1"
   ensure_nginx
@@ -228,14 +224,13 @@ EOF
   systemctl reload nginx || systemctl restart nginx
   ok "Nginx konfiguriert (HTTP-only, TLS extern via Reverse Proxy)."
 }
-}
 
-# --- Config helpers ------------------------------------------------------------
+# ===================== Config helpers =====================
 write_default_config_if_missing() {
   if [ ! -f "${API_ETC_DIR}/config.yml" ]; then
     cat > "${API_ETC_DIR}/config.yml" <<EOF
 service:
-  publicurl: https://example.org
+  publicurl: http://localhost
   interface: 0.0.0.0
   port: ${API_PORT}
 
@@ -248,15 +243,11 @@ database:
 
 files:
   basepath: ${API_DATA_DIR}
-
-# cors:
-#   enabled: false
 EOF
     ok "Default /etc/vikunja/config.yml erstellt (bitte anpassen!)."
   fi
 }
 
-# --- State helpers -------------------------------------------------------------
 save_state() {
   mkdir -p "$(dirname "${STATE_FILE}")"
   cat > "${STATE_FILE}" <<EOF
@@ -276,16 +267,16 @@ is_running() {
   systemctl is-active --quiet "$1"
 }
 
-# --- Actions -------------------------------------------------------------------
+# ===================== Actions =====================
 install_combined() {
-  b "Installiere kombinierte Binary-Variante (API+FE im einen Prozess)..."
+  b "Installiere kombinierte Binary-Variante (API+FE im einen Prozess)…"
   install_packages
   ensure_users_dirs
   download_api_release "${DEFAULT_API_VER}"
   write_default_config_if_missing
   systemctl stop ${API_SERVICE_SPLIT} || true
   systemctl disable ${API_SERVICE_SPLIT} || true
-  # Launch combined binary as 'vikunja' service if exists or create minimal unit
+
   if systemctl list-unit-files | grep -q "^${API_SERVICE_COMBINED}\\.service"; then
     systemctl enable --now ${API_SERVICE_COMBINED}
   else
@@ -359,7 +350,7 @@ configure_nginx_domain() {
   save_state "${MODE:-UNKNOWN}" "${SERVER_NAME}"
 }
 
-# --- Menu ----------------------------------------------------------------------
+# ===================== Menu =====================
 main_menu() {
   load_state
   b "Vikunja Installer/Manager"
@@ -394,6 +385,10 @@ MENU
   esac
 }
 
-# --- Entry ---------------------------------------------------------------------
+# ===================== Entry =====================
 require_root
 main_menu
+BASH
+
+sudo chmod +x /usr/local/sbin/vikunja-installer
+sudo bash -n /usr/local/sbin/vikunja-installer && echo "Syntax ok ✅"
