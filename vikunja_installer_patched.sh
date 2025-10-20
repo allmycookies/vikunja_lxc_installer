@@ -1,4 +1,3 @@
-sudo tee /usr/local/sbin/vikunja-installer >/dev/null <<'BASH'
 #!/bin/bash
 set -euo pipefail
 
